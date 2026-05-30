@@ -14,6 +14,7 @@ forces z to be the viewpoint-canonical 3D construct -> E(x) is the invariant
 feature backbone.
 """
 from __future__ import annotations
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -106,6 +107,43 @@ class MultiTaskNet(nn.Module):
 
     def render(self, z, R):
         return self.dec(rotate3d(z, R))
+
+
+class LatentMatchNet(nn.Module):
+    """Learned per-object 3D latents + pose-aware matchability. Image in, one
+    score per object out, top wins -- the amortised generative classifier:
+    instead of a stored pose-bank, ONE learned latent z_o per object, and the
+    pose-max is a (sampled) group correlation, trained end-to-end.
+
+        score(x, o) = max_g < phi(x), rho(g) z_o >
+    """
+
+    def __init__(self, n_classes, C=4, D=10, M=12, H=48, seed=0):
+        super().__init__()
+        self.C, self.D = C, D
+        self.conv = nn.Sequential(_down(1, 16), _down(16, 32), _down(32, 64))
+        self.to_q = nn.Sequential(nn.Linear(64, 256), nn.ReLU(),
+                                  nn.Linear(256, C * D * D * D))
+        self.Z = nn.Parameter(0.1 * torch.randn(n_classes, C, D, D, D))
+        self.logit_scale = nn.Parameter(torch.tensor(10.0))
+        rng = np.random.default_rng(seed)
+        from gestalt.render3d import rand_rotation
+        G = np.stack([rand_rotation(rng) for _ in range(M)]).astype(np.float32)
+        self.register_buffer("G", torch.tensor(G))
+
+    def _norm(self, V):
+        return F.normalize(V.flatten(1), dim=1).view_as(V)
+
+    def forward(self, x):
+        N = x.size(0); O = self.Z.size(0)
+        h = F.adaptive_avg_pool2d(self.conv(x), 1).flatten(1)
+        Q = self._norm(self.to_q(h).view(N, self.C, self.D, self.D, self.D))
+        scores = []
+        for m in range(self.G.size(0)):                       # sampled poses
+            Rg = self.G[m].unsqueeze(0).expand(O, 3, 3)
+            Zr = self._norm(rotate3d(self.Z, Rg))             # (O,C,D,D,D)
+            scores.append(torch.einsum("ncxyz,ocxyz->no", Q, Zr))   # (N,O) cosine match
+        return self.logit_scale * torch.stack(scores, -1).max(-1).values
 
 
 class MVNet(nn.Module):
