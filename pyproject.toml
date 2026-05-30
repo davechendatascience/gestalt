@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gestalt"
+version = "0.0.0"
+description = "Process x relation x symbol: transfer-robust high-level representations that perceive entities as wholes."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+# Symbolic "readout" stage. Optional — the core does not require it.
+symbol = ["tessera"]
+# Process/perception experiments.
+torch = ["torch", "scikit-image"]
+dev = ["pytest", "matplotlib"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
