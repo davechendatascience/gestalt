@@ -169,7 +169,8 @@ def render(pts, normals, R, H=64, scale=0.40):
 
 
 def render_views(po, azimuths, elevations, H=64):
-    """Render an object at the cartesian product of azimuths x elevations.
+    """Render an object at the cartesian product of azimuths x elevations
+    (orthographic, centred) -- kept for canonical-orbit previews/verification.
     Returns imgs (K,H,W), az (K,), el (K,), R (K,3,3)."""
     pts, nrm = po
     imgs, A, E, Rs = [], [], [], []
@@ -179,3 +180,71 @@ def render_views(po, azimuths, elevations, H=64):
             imgs.append(render(pts, nrm, Rm, H))
             A.append(az); E.append(el); Rs.append(Rm)
     return (np.stack(imgs), np.array(A, float), np.array(E, float), np.stack(Rs))
+
+
+# ---------------- full-DOF pinhole camera (all generative DOF) ---------------
+# Pose DOF per view: orientation SO(3) (3, incl. roll), image pan (2), distance
+# (1, = scale + perspective), with a pinhole PERSPECTIVE projection. Focal is
+# fixed (one more intrinsic DOF if wanted). This spans the real nuisance group
+# the recogniser must be invariant to -- not just an az/el slice.
+
+def quat_to_R(q):
+    w, x, y, z = q / (np.linalg.norm(q) + 1e-12)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def rand_rotation(rng):
+    """Uniform random rotation on SO(3) (Shoemake)."""
+    u1, u2, u3 = rng.random(3)
+    q = np.array([np.sqrt(u1) * np.cos(2 * np.pi * u3),
+                  np.sqrt(1 - u1) * np.sin(2 * np.pi * u2),
+                  np.sqrt(1 - u1) * np.cos(2 * np.pi * u2),
+                  np.sqrt(u1) * np.sin(2 * np.pi * u3)])
+    return quat_to_R(q)
+
+
+def render_camera(pts, nrm, R, dist=4.0, f=2.0, pan=(0.0, 0.0), H=64, perspective=True):
+    """Pinhole render: rotate object by R (SO(3)), place at `dist` along the view
+    axis, project (perspective divides by depth -> foreshortening; ortho doesn't),
+    shift by image `pan`. Back-face cull + painter z-order, normal shading."""
+    Pr = pts @ R.T
+    Nc = nrm @ R.T
+    depth = Pr[:, 2] + dist                       # camera at origin looking +z
+    if perspective:
+        x = f * Pr[:, 0] / depth
+        y = f * Pr[:, 1] / depth
+    else:
+        x = f * Pr[:, 0] / dist
+        y = f * Pr[:, 1] / dist
+    viewdir = np.stack([Pr[:, 0], Pr[:, 1], depth], 1)
+    viewdir /= (np.linalg.norm(viewdir, axis=1, keepdims=True) + 1e-9)
+    facing = -(Nc * viewdir).sum(1)               # >0 if normal points at camera
+    vis = facing > 0.02
+    x, y, depth, facing = x[vis], y[vis], depth[vis], facing[vis]
+    u = np.clip(((x + pan[0]) * 0.5 + 0.5) * H, 0, H - 1).astype(int)
+    v = np.clip((0.5 - (y + pan[1]) * 0.5) * H, 0, H - 1).astype(int)
+    order = np.argsort(-depth)                     # far first; near overwrites
+    sh = np.clip(0.25 + 0.75 * facing, 0, 1)
+    img = np.zeros((H, H), np.float32)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            vv = np.clip(v + dy, 0, H - 1); uu = np.clip(u + dx, 0, H - 1)
+            img[vv[order], uu[order]] = sh[order]
+    return img
+
+
+def sample_views(po, K, rng, H=64, perspective=True):
+    """K random views spanning ALL DOF: orientation~SO(3), distance~[3,7],
+    pan~[-.22,.22]^2. Returns imgs (K,H,W) and pose dict of arrays."""
+    pts, nrm = po
+    imgs = np.empty((K, H, H), np.float32)
+    R = np.empty((K, 3, 3)); dist = np.empty(K); pan = np.empty((K, 2))
+    for k in range(K):
+        R[k] = rand_rotation(rng)
+        dist[k] = rng.uniform(3.0, 7.0)
+        pan[k] = rng.uniform(-0.22, 0.22, 2)
+        imgs[k] = render_camera(pts, nrm, R[k], dist[k], 2.0, pan[k], H, perspective)
+    return imgs, {"R": R, "dist": dist, "pan": pan, "f": np.full(K, 2.0)}
