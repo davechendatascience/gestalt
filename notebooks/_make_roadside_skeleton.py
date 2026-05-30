@@ -303,7 +303,142 @@ for a in ax.ravel(): a.axis('off')
 plt.suptitle('Amortized encoder: crop (top) | COCO mask (mid) | predicted-pose mesh silhouette (bottom)')
 plt.tight_layout(); plt.show()''')
 
-md("""## 10. To go further (the parts that lift the ceiling)
+md("""## 10. Real track B: **Pascal3D+** — real images + CAD + ground-truth viewpoint
+
+Unlike COCO (masks, no shape) and Cityscapes (masks, no shape), **Pascal3D+** ships real images
+**with an aligned CAD and a continuous viewpoint (azimuth/elevation)** for 12 rigid categories
+incl. **car / bicycle / motorbike / bus** — and it's downloadable without a login. So here the
+**CADs are the mesh bank**, the **GT viewpoint** builds the silhouette target, and we can report
+real **pose error** (MedErr, Acc@30deg), the canonical Pascal3D+ metric — not just IoU.""")
+code(r'''import os, subprocess
+from scipy.io import loadmat
+P3D_DIR = os.environ.get('P3D_DIR', 'PASCAL3D+_release1.1')
+if not os.path.isdir(P3D_DIR):
+    try:
+        print('Downloading Pascal3D+ release1.1 (~7.5 GB; slow) ...')
+        subprocess.run(['wget', '-q', 'ftp://cs.stanford.edu/cs/cvgl/PASCAL3D+_release1.1.zip',
+                        '-O', 'p3d.zip'], check=True)
+        subprocess.run(['unzip', '-q', 'p3d.zip'], check=True)
+    except Exception as e:
+        print('auto-download failed (%s). Obtain PASCAL3D+_release1.1 manually ' % e +
+              '(https://cvgl.stanford.edu/projects/pascal3d.html) or mount Drive, then set '
+              'os.environ["P3D_DIR"].')
+print('P3D_DIR exists:', os.path.isdir(P3D_DIR))''')
+
+md("## 11. Pascal3D+ loader: CAD bank + (crop, GT azimuth/elevation, cad) samples")
+code(r'''P3D_CLASSES = ['car', 'bicycle', 'motorbike', 'bus']   # restrict here to go faster
+N_PER_P3D = 120
+CADDIR = os.path.join(P3D_DIR, 'CAD')
+
+def load_cads(cls):                                    # CAD/<cls>.mat -> list of (verts, faces)
+    m = loadmat(os.path.join(CADDIR, cls + '.mat'), squeeze_me=True, struct_as_record=False)
+    out = []
+    for c in np.atleast_1d(m[cls]):
+        v = np.asarray(c.vertices, dtype='float32')
+        f = np.asarray(c.faces, dtype='int64') - 1     # MATLAB is 1-indexed
+        vt = torch.tensor(v, device=dev); vt = (vt - vt.mean(0)) / (vt.abs().max() + 1e-8)
+        out.append((vt, torch.tensor(f, device=dev)))
+    return out
+
+CAD_BANK = {cls: load_cads(cls) for cls in P3D_CLASSES}
+print('CADs/class:', {c: len(v) for c, v in CAD_BANK.items()})
+
+def parse_ann(path, cls):                              # one annotation .mat -> list of objects
+    rec = loadmat(path, squeeze_me=True, struct_as_record=False)['record']
+    res = []
+    for o in np.atleast_1d(rec.objects):
+        if getattr(o, 'class', None) != cls: continue
+        vp = getattr(o, 'viewpoint', None)
+        if vp is None or float(getattr(vp, 'distance', 0) or 0) == 0: continue   # need continuous vp
+        az = float(getattr(vp, 'azimuth', getattr(vp, 'azimuth_coarse', 0)))
+        el = float(getattr(vp, 'elevation', getattr(vp, 'elevation_coarse', 0)))
+        ci = int(getattr(o, 'cad_index', 1)) - 1
+        bb = np.asarray(o.bbox, dtype='float32')        # x1,y1,x2,y2
+        res.append((az, el, ci, bb))
+    return res
+
+crops_p, az_p, el_p, keys_p = [], [], [], []
+for cls in P3D_CLASSES:
+    got = 0
+    for src, ext in [('pascal', 'jpg'), ('imagenet', 'JPEG')]:
+        adir = os.path.join(P3D_DIR, 'Annotations', f'{cls}_{src}')
+        idir = os.path.join(P3D_DIR, 'Images', f'{cls}_{src}')
+        if not os.path.isdir(adir): continue
+        for fn in sorted(os.listdir(adir)):
+            if got >= N_PER_P3D or not fn.endswith('.mat'): break
+            ipath = os.path.join(idir, fn[:-4] + '.' + ext)
+            if not os.path.exists(ipath): continue
+            try:
+                objs = parse_ann(os.path.join(adir, fn), cls)
+            except Exception:
+                continue
+            im = np.array(Image.open(ipath).convert('RGB'))
+            for az, el, ci, bb in objs:
+                if got >= N_PER_P3D: break
+                if ci >= len(CAD_BANK[cls]): continue
+                x0, y0, x1, y1 = [int(v) for v in bb]
+                if x1 - x0 < 16 or y1 - y0 < 16: continue
+                crop = np.array(Image.fromarray(im[y0:y1, x0:x1]).resize((S, S))) / 255.0
+                crops_p.append(crop.astype('float32')); az_p.append(az); el_p.append(el)
+                keys_p.append((cls, ci)); got += 1
+    print(f'{cls}: {got} instances')
+
+crops_p = torch.tensor(np.stack(crops_p)).permute(0, 3, 1, 2)
+az_p = torch.tensor(az_p, dtype=torch.float32); el_p = torch.tensor(el_p, dtype=torch.float32)
+print('Pascal3D+ set:', crops_p.shape)''')
+
+md("## 12. Train the pose encoder on Pascal3D+ (render-and-compare; report viewpoint error)")
+code(r'''def render_p3d(az, el, keys):                       # batched, heterogeneous CADs
+    V = [CAD_BANK[c][i][0] for (c, i) in keys]; Fc = [CAD_BANK[c][i][1] for (c, i) in keys]
+    meshes = Meshes(verts=V, faces=Fc)
+    R, T = look_at_view_transform(dist=2.7, elev=el, azim=az, device=dev)
+    cam = FoVPerspectiveCameras(device=dev, R=R, T=T)
+    r = MeshRenderer(rasterizer=MeshRasterizer(cameras=cam, raster_settings=raster),
+                     shader=SoftSilhouetteShader(blend_params=blend))
+    return r(meshes, cameras=cam)[..., 3]
+
+encp = torchvision.models.resnet18(weights=None); encp.fc = nn.Linear(512, 2); encp = encp.to(dev)
+opt = torch.optim.Adam(encp.parameters(), lr=1e-3)
+cd, azd, eld = crops_p.to(dev), az_p.to(dev), el_p.to(dev)
+ntr = int(0.85 * len(cd)); perm0 = torch.randperm(len(cd))
+tr, te = perm0[:ntr], perm0[ntr:]; bs = 16
+
+def ang_err(a, b):
+    d = (a - b).abs() % 360; return torch.minimum(d, 360 - d)
+
+for ep in range(20):
+    encp.train(); p = tr[torch.randperm(len(tr))]; tot = 0.0
+    for i in range(0, len(p), bs):
+        idx = p[i:i+bs]; k = [keys_p[j] for j in idx.tolist()]
+        out = encp(cd[idx])
+        azh = 360*torch.sigmoid(out[:, 0]); elh = 180*torch.sigmoid(out[:, 1]) - 90
+        with torch.no_grad():
+            tgt = (render_p3d(azd[idx], eld[idx], k) > 0.5).float()     # GT-pose CAD silhouette
+        sil = render_p3d(azh, elh, k).clamp(1e-4, 1-1e-4)
+        loss = F.binary_cross_entropy(sil, tgt)
+        opt.zero_grad(); loss.backward(); opt.step(); tot += loss.item()
+    print(f'epoch {ep+1}/20  loss={tot/(len(p)//bs+1):.4f}')
+
+encp.eval()
+with torch.no_grad():
+    out = encp(cd[te]); azh = 360*torch.sigmoid(out[:, 0]); elh = 180*torch.sigmoid(out[:, 1]) - 90
+    err = ang_err(azh, azd[te])
+print(f'azimuth MedErr={float(err.median()):.1f} deg   Acc@30deg={float((err<30).float().mean()):.3f}  (n={len(te)})')
+sel = te[:6].tolist()
+fig, ax = plt.subplots(3, 6, figsize=(13, 6))
+for j, kk in enumerate(sel):
+    k = [keys_p[kk]]
+    tgt = render_p3d(azd[kk:kk+1], eld[kk:kk+1], k)[0].cpu().numpy()
+    o = encp(cd[kk:kk+1]); a = 360*torch.sigmoid(o[:,0]); e = 180*torch.sigmoid(o[:,1])-90
+    pr = render_p3d(a, e, k)[0].detach().cpu().numpy()
+    ax[0,j].imshow(crops_p[kk].permute(1,2,0).numpy()); ax[0,j].set_title(keys_p[kk][0], fontsize=8)
+    ax[1,j].imshow(tgt, cmap='gray'); ax[1,j].set_title(f'GT az={float(azd[kk]):.0f}', fontsize=8)
+    ax[2,j].imshow(pr, cmap='gray'); ax[2,j].set_title(f'pred az={float(a):.0f}', fontsize=8)
+for a in ax.ravel(): a.axis('off')
+plt.suptitle('Pascal3D+: real crop | GT-pose CAD silhouette | predicted-pose CAD silhouette')
+plt.tight_layout(); plt.show()''')
+
+md("""## 13. To go further (the parts that lift the ceiling)
 
 - **Per-class PCA shape basis (the paper's 10-dim TSDF space).** Cell 4 loads ONE canonical
   CAD per class. Load *many* (`ShapeNetCore(..., synsets=['02958343'])`, iterate), voxelize/TSDF
