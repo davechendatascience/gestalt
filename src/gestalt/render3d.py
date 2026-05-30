@@ -116,9 +116,20 @@ def capsule(r, h):
     return (np.concatenate([c[0], t[0], b[0]]), np.concatenate([c[1], t[1], b[1]]))
 
 
+def _normalize(po):
+    """Uniformly scale an object so its BOUNDING SPHERE has radius 1 (max
+    Euclidean norm = 1). Using the sphere, not the per-axis extent, guarantees
+    that NO rotation projects beyond the frame. Uniform scale leaves normals
+    unchanged."""
+    p, n = po
+    r = np.linalg.norm(p, axis=1).max()
+    return p / (r + 1e-9), n
+
+
 def library():
-    """The procedural 'asset library': name -> (points, normals)."""
-    return {
+    """The procedural 'asset library': name -> (points, normals), each
+    normalised to a common canonical scale so no view clips the frame."""
+    raw = {
         "sphere": sphere(), "ellipsoid_tall": ellipsoid(.7, 1.3, .7),
         "ellipsoid_flat": ellipsoid(1.3, .6, 1.0), "cube": box(.9, .9, .9),
         "slab": box(1.3, .35, .9), "rod": box(.32, 1.35, .32),
@@ -127,6 +138,7 @@ def library():
         "torus_thin": torus(1.05, .2), "dumbbell": dumbbell(),
         "Lshape": lshape(), "capsule": capsule(.45, .9),
     }
+    return {k: _normalize(v) for k, v in raw.items()}
 
 
 # ---------------- camera + orthographic splat renderer ----------------------
