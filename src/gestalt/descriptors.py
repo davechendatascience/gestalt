@@ -77,6 +77,17 @@ def _radial_signature(mask, xc, yc):
     return sig
 
 
+def radial_signature(mask: np.ndarray) -> np.ndarray:
+    """Public: centroid-distance signature r(theta) of a mask (N_ANGLES,).
+
+    The observation fed to analysis-by-synthesis inference. Appearance-blind
+    (a function of the silhouette only)."""
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return np.zeros(N_ANGLES)
+    return _radial_signature(mask, xs.mean(), ys.mean())
+
+
 def _perimeter(mask):
     # boundary pixels: in-mask pixels adjacent to a background pixel (4-neigh)
     m = mask
@@ -111,6 +122,32 @@ def descriptor(mask: np.ndarray) -> np.ndarray:
 
 def descriptor_matrix(masks: np.ndarray) -> np.ndarray:
     return np.stack([descriptor(m) for m in masks])
+
+
+def relational_descriptor(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Appearance read RELATIONALLY: foreground statistics measured RELATIVE to
+    the background, not in absolute palette terms.
+
+    This is the simplest stand-in for the "relation" leg of the triangle. A
+    transferable cue (fg-vs-bg contrast) shows up here and survives the regime
+    shift; an absolute-palette cue does not. Compare against a region-local CNN
+    that keys on absolute texture and fails to isolate the relational signal.
+    """
+    fg = img[mask]
+    bg = img[~mask]
+    if len(fg) == 0 or len(bg) == 0:
+        return np.zeros(5, dtype=np.float64)
+    contrast = float(fg.mean() - bg.mean())            # relative luminance (transferable cue)
+    color_rel = (fg.mean(0) - bg.mean(0)).astype(float)  # per-channel relative (3,)
+    fg_spread = float(fg.std())                        # internal texture energy
+    return np.concatenate([[contrast], color_rel, [fg_spread]]).astype(np.float64)
+
+
+def relational_matrix(imgs: np.ndarray, masks: np.ndarray) -> np.ndarray:
+    return np.stack([relational_descriptor(i, m) for i, m in zip(imgs, masks)])
+
+
+RELATIONAL_NAMES = ["contrast", "rel_R", "rel_G", "rel_B", "fg_spread"]
 
 
 FEATURE_NAMES = (

@@ -15,7 +15,18 @@ import numpy as np
 from matplotlib.path import Path
 from scipy.ndimage import gaussian_filter
 
-CLASSES = ["triangle", "square", "pentagon", "hexagon", "star", "cross"]
+# Six silhouette-separable classes, plus an AMBIGUOUS PAIR (discA/discB) that
+# share an identical disc silhouette and can ONLY be told apart by appearance.
+# The pair drops the shape-only ceiling below 100% and opens the band where a
+# transfer-robust appearance reader (direction A) could beat pure shape.
+CLASSES = ["triangle", "square", "pentagon", "hexagon", "star", "cross",
+           "discA", "discB"]
+
+# Per-class disambiguating "cue" scalar in [0,1]. Neutral (0.5) for the
+# shape-separable classes; the disc pair is split to the extremes so only the
+# cue separates them.
+CUE = {c: 0.5 for c in CLASSES}
+CUE["discA"], CUE["discB"] = 0.12, 0.88
 
 
 # ----------------------------------------------------------------------
@@ -47,6 +58,7 @@ def _verts(cls: str):
     if cls == "hexagon":  return _ngon(6)
     if cls == "star":     return _star(5)
     if cls == "cross":    return _cross()
+    if cls in ("discA", "discB"):  return _ngon(24)   # identical disc silhouette
     raise ValueError(cls)
 
 
@@ -87,15 +99,18 @@ def _palette(rng, base, spread=0.12, k=6):
     return np.clip(base + rng.uniform(-spread, spread, (k, 3)), 0, 1)
 
 
+# The two regimes share BACKGROUND LUMINANCE (~0.5) so a relative-luminance cue
+# can transfer; they differ in HUE (warm vs cool) and TEXTURE (speckle vs
+# stripes), which is what a region-local CNN latches onto and fails to transfer.
 def sim_regime(rng):
-    return Regime("sim", _palette(rng, np.array([0.85, 0.55, 0.25])),  # warm
-                  _palette(rng, np.array([0.20, 0.22, 0.28])),
+    return Regime("sim", _palette(rng, np.array([0.72, 0.52, 0.34])),   # warm fg, lum~0.53
+                  _palette(rng, np.array([0.56, 0.50, 0.44])),          # warm-gray bg, lum~0.50
                   texture="speckle", tex_scale=1.0, noise=0.05, blur=0.0)
 
 
 def real_regime(rng):
-    return Regime("real", _palette(rng, np.array([0.25, 0.55, 0.80])),  # cool (disjoint)
-                  _palette(rng, np.array([0.85, 0.85, 0.80])),
+    return Regime("real", _palette(rng, np.array([0.34, 0.52, 0.72])),  # cool fg, lum~0.53
+                  _palette(rng, np.array([0.44, 0.50, 0.56])),          # cool-gray bg, lum~0.50
                   texture="stripes", tex_scale=6.0, noise=0.09, blur=0.7)
 
 
@@ -111,11 +126,37 @@ def _texture_field(size, reg: Regime, rng):
     return 0.65 + 0.35 * t                                  # brightness modulation in [0.65,1]
 
 
-def render(mask: np.ndarray, reg: Regime, rng) -> np.ndarray:
+def _apply_cue(fg, reg, rng, cue, cue_mode):
+    """Encode the disambiguating cue into the foreground appearance.
+
+    "transferable": the cue sets the foreground's brightness RELATIVE to its
+        base colour, applied IDENTICALLY in sim and real. Because it rides on a
+        relational property (fg-vs-bg contrast) rather than an absolute palette,
+        it survives the sim->real shift -> a model that reads it generalises.
+    "spurious": the cue tints the foreground (red channel) in SIM only; in REAL
+        the tint is randomised. The cue is predictive in sim but carries no
+        transferable information -> shape is the honest ceiling on real.
+    "none": no cue (the ambiguous pair is then unsolvable by anyone).
+    """
+    fg = fg.astype(float).copy()
+    if cue_mode in ("transferable", "spurious"):
+        # Both modes encode the cue in foreground LUMINANCE (rides on the matched
+        # background baseline, so it is readable the same way in both regimes).
+        # The ONLY difference: spurious randomises the cue in the real regime, so
+        # it predicts class in sim but carries no transferable information.
+        eff = cue
+        if cue_mode == "spurious" and reg.name == "real":
+            eff = rng.random()
+        fg *= (0.55 + 0.9 * eff)
+    return np.clip(fg, 0, 1)
+
+
+def render(mask: np.ndarray, reg: Regime, rng, cue=0.5, cue_mode="none") -> np.ndarray:
     """mask (H,W bool) -> RGB (H,W,3) in [0,1] under appearance regime `reg`."""
     size = mask.shape[0]
     fg = reg.fg_palette[rng.integers(len(reg.fg_palette))]
     bg = reg.bg_palette[rng.integers(len(reg.bg_palette))]
+    fg = _apply_cue(fg, reg, rng, cue, cue_mode)
     tex = _texture_field(size, reg, rng)[..., None]
     img = np.where(mask[..., None], fg * tex, bg * tex)
     img = img + rng.normal(0, reg.noise, img.shape)
@@ -129,17 +170,76 @@ def render(mask: np.ndarray, reg: Regime, rng) -> np.ndarray:
 # Dataset builder
 # ----------------------------------------------------------------------
 
-def build(n_per_class: int, size: int, regime_fn, seed: int):
-    """Return (imgs (N,H,W,3), masks (N,H,W) bool, labels (N,)) for a regime."""
+def build(n_per_class: int, size: int, regime_fn, seed: int, cue_mode="none"):
+    """Return (imgs (N,H,W,3), masks (N,H,W) bool, labels (N,)) for a regime.
+
+    `cue_mode` controls how the ambiguous disc pair is disambiguated:
+    "transferable" | "spurious" | "none" (see `_apply_cue`).
+    """
     rng = np.random.default_rng(seed)
     reg = regime_fn(rng)
     imgs, masks, labels = [], [], []
     for ci, cls in enumerate(CLASSES):
         for _ in range(n_per_class):
             m = make_mask(cls, size, rng)
-            imgs.append(render(m, reg, rng))
+            imgs.append(render(m, reg, rng, cue=CUE[cls], cue_mode=cue_mode))
             masks.append(m)
             labels.append(ci)
     idx = rng.permutation(len(labels))
     return (np.stack(imgs)[idx], np.stack(masks)[idx],
             np.asarray(labels)[idx])
+
+
+# ----------------------------------------------------------------------
+# Persistence + visual inspection
+# ----------------------------------------------------------------------
+
+def save_dataset(path, imgs, masks, labels):
+    from pathlib import Path
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, imgs=imgs.astype(np.float32),
+                        masks=masks.astype(bool), labels=labels.astype(np.int64))
+
+
+def load_dataset(path):
+    d = np.load(path)
+    return d["imgs"], d["masks"], d["labels"]
+
+
+def build_cached(n_per_class, size, regime_fn, seed, cue_mode, path):
+    """build(), but cached to `path` (.npz). Reuses the file if it exists."""
+    from pathlib import Path
+    if Path(path).exists():
+        return load_dataset(path)
+    data = build(n_per_class, size, regime_fn, seed, cue_mode=cue_mode)
+    save_dataset(path, *data)
+    return data
+
+
+def save_preview(path, size=48, seed=7):
+    """Grid PNG: one example per class, sim row vs real row, per cue mode."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    modes = ["transferable", "spurious", "none"]
+    fig, axes = plt.subplots(len(modes) * 2, len(CLASSES),
+                             figsize=(1.4 * len(CLASSES), 1.4 * len(modes) * 2))
+    for mi, mode in enumerate(modes):
+        for ri, regime_fn in enumerate((sim_regime, real_regime)):
+            rng = np.random.default_rng(seed + ri)
+            reg = regime_fn(rng)
+            for ci, cls in enumerate(CLASSES):
+                ax = axes[mi * 2 + ri, ci]
+                m = make_mask(cls, size, rng)
+                ax.imshow(render(m, reg, rng, cue=CUE[cls], cue_mode=mode))
+                ax.set_xticks([]); ax.set_yticks([])
+                if mi == 0 and ri == 0:
+                    ax.set_title(cls, fontsize=8)
+                if ci == 0:
+                    ax.set_ylabel(f"{mode[:5]}/{reg.name}", fontsize=7)
+    fig.suptitle("gestalt testbed: rows = (cue-mode / regime), cols = classes", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)

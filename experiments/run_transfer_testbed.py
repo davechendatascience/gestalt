@@ -24,7 +24,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from gestalt.synth import build, sim_regime, real_regime, CLASSES
-from gestalt.descriptors import descriptor_matrix, FEATURE_NAMES
+from gestalt.descriptors import descriptor_matrix, relational_matrix
 
 
 def acc(pred, y):
@@ -71,19 +71,26 @@ def run_cnn(tr, va, te, size, epochs, seed):
 
 # ---------------- Descriptors + readout (appearance-blind) ----------------
 
-def run_descriptors(tr, va, te, use_csp=False):
-    Dtr = descriptor_matrix(tr[1]); ytr = tr[2]
-    Dva = descriptor_matrix(va[1]); yva = va[2]
-    Dte = descriptor_matrix(te[1]); yte = te[2]
-    sc = StandardScaler().fit(Dtr)
-    Ztr, Zva, Zte = sc.transform(Dtr), sc.transform(Dva), sc.transform(Dte)
+def _readout(Ftr, ytr, Fva, yva, Fte, yte):
+    sc = StandardScaler().fit(Ftr)
+    clf = LogisticRegression(max_iter=3000, C=1.0).fit(sc.transform(Ftr), ytr)
+    return (acc(clf.predict(sc.transform(Fva)), yva),
+            acc(clf.predict(sc.transform(Fte)), yte))
 
-    clf = LogisticRegression(max_iter=2000, C=1.0).fit(Ztr, ytr)
-    res = {"logistic": (acc(clf.predict(Zva), yva), acc(clf.predict(Zte), yte))}
 
-    if use_csp:
-        res["csp"] = _csp_ovr(Ztr, ytr, Zva, yva, Zte, yte)
-    return res, (Dtr, ytr)
+def run_descriptors(tr, va, te):
+    """Three readouts: shape (invariant), relational (fg-vs-bg appearance),
+    and shape+relational. Logistic in all cases to isolate the REPRESENTATION
+    effect from the readout."""
+    S = [descriptor_matrix(x[1]) for x in (tr, va, te)]        # shape
+    R = [relational_matrix(x[0], x[1]) for x in (tr, va, te)]  # relational
+    ytr, yva, yte = tr[2], va[2], te[2]
+    reps = {
+        "shape": S,
+        "relational": R,
+        "shape+rel": [np.hstack([s, r]) for s, r in zip(S, R)],
+    }
+    return {k: _readout(F[0], ytr, F[1], yva, F[2], yte) for k, F in reps.items()}
 
 
 def _csp_ovr(Ztr, ytr, Zva, yva, Zte, yte):
@@ -104,45 +111,53 @@ def _csp_ovr(Ztr, ytr, Zva, yva, Zte, yte):
     return acc(sva.argmax(1), yva), acc(ste.argmax(1), yte)
 
 
+def run_condition(cue_mode, args):
+    tr = build(args.n_train, args.size, sim_regime, seed=args.seed, cue_mode=cue_mode)
+    va = build(args.n_eval, args.size, sim_regime, seed=args.seed + 1, cue_mode=cue_mode)
+    te = build(args.n_eval, args.size, real_regime, seed=args.seed + 2, cue_mode=cue_mode)
+    cnn_va, cnn_te = run_cnn(tr, va, te, args.size, args.epochs, args.seed)
+    desc = run_descriptors(tr, va, te)
+    return {"cnn": (cnn_va, cnn_te), **desc}
+
+
+def _row(name, va, te):
+    return f"  {name:14s} sim-val={va:.3f}  real-test={te:.3f}  gap={va-te:+.3f}"
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--size", type=int, default=48)
     p.add_argument("--n-train", type=int, default=600, help="per class")
     p.add_argument("--n-eval", type=int, default=200, help="per class (val and test)")
-    p.add_argument("--epochs", type=int, default=10)
+    p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--csp", action="store_true", help="also run csp symbolic readout")
     args = p.parse_args()
 
-    print("=== gestalt transfer testbed ===")
-    print(f"classes={CLASSES} size={args.size}")
-    t0 = time.time()
-    tr = build(args.n_train, args.size, sim_regime, seed=args.seed)        # sim train
-    va = build(args.n_eval, args.size, sim_regime, seed=args.seed + 1)     # sim val
-    te = build(args.n_eval, args.size, real_regime, seed=args.seed + 2)    # REAL test
-    print(f"built data in {time.time()-t0:.0f}s "
-          f"(train {len(tr[2])}, val {len(va[2])}, real-test {len(te[2])})\n")
+    print("=== gestalt transfer testbed (ambiguous-pair conditions) ===")
+    print(f"classes={CLASSES}\nchance={1/len(CLASSES):.3f}  "
+          f"shape-only ceiling ~ {(len(CLASSES)-1)/len(CLASSES):.3f} "
+          f"(disc pair collapses to a coin-flip)\n")
 
-    print("--- CNN on RGB (region-local) ---")
-    t0 = time.time()
-    cnn_va, cnn_te = run_cnn(tr, va, te, args.size, args.epochs, args.seed)
-    print(f"  sim-val={cnn_va:.3f}  real-test={cnn_te:.3f}  gap={cnn_va-cnn_te:+.3f}  "
-          f"({time.time()-t0:.0f}s)\n")
+    results = {}
+    for mode in ["transferable", "spurious"]:
+        t0 = time.time()
+        print(f"### condition: cue = {mode.upper()} "
+              f"({'cue survives sim->real' if mode=='transferable' else 'cue is sim-only'})")
+        res = run_condition(mode, args)
+        for name, (va, te) in res.items():
+            tag = {"cnn": "CNN-RGB", "shape": "shape(inv)",
+                   "relational": "relational", "shape+rel": "shape+rel"}[name]
+            print(_row(tag, va, te))
+        print(f"  ({time.time()-t0:.0f}s)\n")
+        results[mode] = res
 
-    print("--- Descriptors on mask (appearance-invariant) ---")
-    t0 = time.time()
-    res, _ = run_descriptors(tr, va, te, use_csp=args.csp)
-    for k, (a_va, a_te) in res.items():
-        print(f"  [{k:8s}] sim-val={a_va:.3f}  real-test={a_te:.3f}  gap={a_va-a_te:+.3f}")
-    print(f"  ({time.time()-t0:.0f}s)\n")
-
-    print("=== summary ===")
-    print(f"  CNN-RGB        gap={cnn_va-cnn_te:+.3f}  (real-test {cnn_te:.3f})")
-    for k, (a_va, a_te) in res.items():
-        print(f"  descr-{k:8s} gap={a_va-a_te:+.3f}  (real-test {a_te:.3f})")
-    print("\nReading: a large CNN gap with a small descriptor gap = the triangle's"
-          "\npremise holds (structure transfers where region-local appearance does not)."
-          "\nThe descriptor real-test acc is the shape-only ceiling.")
+    print("=== what to read ===")
+    print("shape(inv): zero gap, capped at the ceiling (blind to the disc cue) in BOTH modes.")
+    print("CNN-RGB:    big gap in both modes (texture reliance).")
+    print("shape+rel TRANSFERABLE: should BEAT the shape ceiling on real-test")
+    print("           (relational fg-vs-bg cue survives the shift) -> the band is fillable.")
+    print("shape+rel SPURIOUS: should NOT beat shape on real-test (cue is sim-only);")
+    print("           may even dip below as the readout trusts a cue that vanishes -> the floor.")
 
 
 if __name__ == "__main__":
