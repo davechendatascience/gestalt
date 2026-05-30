@@ -77,3 +77,32 @@ class EquivAE(nn.Module):
     def code(self, x):
         """Flattened canonical latent -- the viewpoint-invariant feature."""
         return self.enc(x).flatten(1)
+
+
+class MultiTaskNet(nn.Module):
+    """One CNN encoder, two heads: classify AND (optionally) explain the 3D via
+    render-and-compare. With the render auxiliary OFF (lam=0) it is exactly a
+    vanilla CNN classifier; ON, the SAME encoder is also told to reconstruct
+    other views from a rotated 3D voxel -- i.e. equipped with the extra pose +
+    3D information the sim provides. Tests: does that extra info help recognition?
+    """
+
+    def __init__(self, n_classes, C=8, D=16, H=48):
+        super().__init__()
+        self.C, self.D = C, D
+        self.conv = nn.Sequential(_down(1, 16), _down(16, 32), _down(32, 64))
+        self.cls = nn.Linear(64, n_classes)
+        self.to_vox = nn.Sequential(nn.Linear(64, 256), nn.ReLU(),
+                                    nn.Linear(256, C * D * D * D))
+        self.dec = Decoder(C, H)
+
+    def feat(self, x):
+        return F.adaptive_avg_pool2d(self.conv(x), 1).flatten(1)
+
+    def forward(self, x):
+        h = self.feat(x)
+        z = self.to_vox(h).view(-1, self.C, self.D, self.D, self.D)
+        return self.cls(h), z
+
+    def render(self, z, R):
+        return self.dec(rotate3d(z, R))

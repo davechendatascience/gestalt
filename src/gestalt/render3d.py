@@ -206,6 +206,16 @@ def rand_rotation(rng):
     return quat_to_R(q)
 
 
+def rand_rotation_cone(rng, amin_deg, amax_deg):
+    """Random rotation whose angle from identity is in [amin,amax] degrees,
+    random axis. Lets us train inside a pose CONE and test OUTSIDE it
+    (extrapolation), where memorising augmentation fails."""
+    axis = rng.normal(size=3); axis /= np.linalg.norm(axis) + 1e-12
+    ang = np.radians(rng.uniform(amin_deg, amax_deg))
+    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    return np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+
+
 def render_camera(pts, nrm, R, dist=4.0, f=2.0, pan=(0.0, 0.0), H=64, perspective=True):
     """Pinhole render: rotate object by R (SO(3)), place at `dist` along the view
     axis, project (perspective divides by depth -> foreshortening; ortho doesn't),
