@@ -106,3 +106,39 @@ class MultiTaskNet(nn.Module):
 
     def render(self, z, R):
         return self.dec(rotate3d(z, R))
+
+
+class MVNet(nn.Module):
+    """Recognise from K views. Three fusion modes test 'more INPUT info helps':
+      'single' : K=1 view -> feature -> classify (the lossy baseline).
+      'pool'   : K views -> features -> MEAN-pool -> classify (more info, no 3D).
+      'fuse3d' : K views -> per-view voxel -> rotate each to the CANONICAL frame
+                 by its known pose -> aggregate -> classify (more info + the
+                 equivariant 3D fusion that stitches lossy views into one shape).
+    """
+
+    def __init__(self, n_classes, mode, C=8, D=16, H=48):
+        super().__init__()
+        self.mode, self.C, self.D = mode, C, D
+        self.conv = nn.Sequential(_down(1, 16), _down(16, 32), _down(32, 64))
+        if mode == "fuse3d":
+            self.to_vox = nn.Sequential(nn.Linear(64, 256), nn.ReLU(),
+                                        nn.Linear(256, C * D * D * D))
+            self.cls = nn.Linear(C * D * D * D, n_classes)
+        else:
+            self.cls = nn.Linear(64, n_classes)
+
+    def feat(self, flat):
+        return F.adaptive_avg_pool2d(self.conv(flat), 1).flatten(1)
+
+    def forward(self, xs, Rs):
+        N, K = xs.shape[:2]
+        flat = xs.reshape(N * K, 1, xs.shape[-2], xs.shape[-1])
+        if self.mode in ("single", "pool"):
+            h = self.feat(flat).reshape(N, K, 64).mean(1)         # K=1 -> single
+            return self.cls(h)
+        h = self.feat(flat)
+        z = self.to_vox(h).view(N * K, self.C, self.D, self.D, self.D)
+        Rt = Rs.transpose(-1, -2).reshape(N * K, 3, 3)            # canonical = R^T (undo pose)
+        Z = rotate3d(z, Rt).view(N, K, self.C, self.D, self.D, self.D).mean(1)
+        return self.cls(Z.flatten(1))
