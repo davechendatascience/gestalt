@@ -40,6 +40,9 @@ class VanillaCNN(nn.Module):
         h = F.adaptive_avg_pool2d(self.f(x), 1).flatten(1)
         return self.head(h), h
 
+    def embed(self, x):
+        return F.adaptive_avg_pool2d(self.f(x), 1).flatten(1)
+
 
 class STN(nn.Module):
     """Predict an affine transform and canonicalise the input (grid_sample)."""
@@ -72,6 +75,10 @@ class GestaltNet(nn.Module):
         h = F.adaptive_avg_pool2d(self.enc(xc), 1).flatten(1)
         return self.head(h), h, xc
 
+    def embed(self, x):
+        xc, _ = self.stn(x)
+        return F.adaptive_avg_pool2d(self.enc(xc), 1).flatten(1)
+
 
 def rotate_batch(x, angles_deg):
     """Rotate a batch (N,1,H,W) by per-sample angles (deg) via grid_sample."""
@@ -80,5 +87,28 @@ def rotate_batch(x, angles_deg):
     theta = torch.zeros(x.size(0), 2, 3, device=x.device, dtype=x.dtype)
     theta[:, 0, 0], theta[:, 0, 1] = c, -s
     theta[:, 1, 0], theta[:, 1, 1] = s, c
+    grid = F.affine_grid(theta, x.size(), align_corners=False)
+    return F.grid_sample(x, grid, align_corners=False)
+
+
+def random_affine_batch(x, severity, rng):
+    """Apply a per-sample random SIMILARITY+shear transform (the widened
+    viewpoint group): rotation, scale, translation, shear, all scaled by
+    `severity` in [0,~1]. severity=0 is identity. theta = scale * R(rot) @ shear,
+    plus translation, in normalised [-1,1] grid coords."""
+    n = x.size(0)
+    u = lambda: torch.tensor(rng.uniform(-1, 1, n), dtype=x.dtype)
+    rot = u() * severity * (90 * torch.pi / 180)
+    scale = torch.exp(u() * severity * 0.4)
+    tx, ty = u() * severity * 0.3, u() * severity * 0.3
+    sh = u() * severity * 0.3
+    c, s = torch.cos(rot), torch.sin(rot)
+    theta = torch.zeros(n, 2, 3, device=x.device, dtype=x.dtype)
+    theta[:, 0, 0] = scale * c
+    theta[:, 0, 1] = scale * (c * sh - s)
+    theta[:, 1, 0] = scale * s
+    theta[:, 1, 1] = scale * (s * sh + c)
+    theta[:, 0, 2] = tx
+    theta[:, 1, 2] = ty
     grid = F.affine_grid(theta, x.size(), align_corners=False)
     return F.grid_sample(x, grid, align_corners=False)
