@@ -55,6 +55,27 @@ def infer(obs: np.ndarray, generator, lam: float = 0.0, tol: float = 0.15) -> In
     return Inference(best, a, ph, e0, land, margin, modes)
 
 
+def aligned_energy(obs: np.ndarray, templ: np.ndarray, max_shift: int = 3):
+    """Pixel-space explanation residual AFTER inferring the coordinate transform.
+
+    The transform here is a 2D translation (the minimal "change of coordinates"
+    a raster image needs); recognition in pixel space is brittle without it. We
+    find the best small shift by circular cross-correlation (FFT) and return the
+    residual there. Using ||obs - shift(templ)||^2 = ||obs||^2 + ||templ||^2 -
+    2<obs, shift(templ)>, the residual reads straight off the correlation peak.
+    """
+    H, W = obs.shape
+    cc = np.fft.ifft2(np.fft.fft2(obs) * np.conj(np.fft.fft2(templ))).real
+    best, bd = -np.inf, (0, 0)
+    for dy in range(-max_shift, max_shift + 1):
+        for dx in range(-max_shift, max_shift + 1):
+            v = cc[dy % H, dx % W]
+            if v > best:
+                best, bd = v, (dy, dx)
+    e = float(np.sum(obs ** 2) + np.sum(templ ** 2) - 2 * best) / obs.size
+    return e, bd[0], bd[1]
+
+
 def synthesize(generator, inf: Inference) -> np.ndarray:
     """The generative direction: render the MAP concept back into a signature."""
     return generator.synthesize(inf.type, inf.scale, inf.phase)
