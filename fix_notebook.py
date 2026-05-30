@@ -1,6 +1,9 @@
-"""Fix 3d_mesh_latent_segmentation.ipynb: (1) PyTorch3D install cell (CPU-safe +
-correct source-build command, no embedded quotes), (2) clean up the evaluation
-cell (remove dead loop + redundant empty figures). Run: python fix_notebook.py"""
+"""Patches for 3d_mesh_latent_segmentation.ipynb.
+Run: python fix_notebook.py
+- install cell: CPU-safe + correct source-build command (no embedded quotes).
+- eval cell: remove dead loop + redundant empty figures -> one clean GT|pred grid.
+- mesh load: attach a uniform vertex texture if the .obj has none (fixes
+  'Meshes does not have textures' from the Phong/RGB visualization renderer)."""
 import json
 from pathlib import Path
 
@@ -24,8 +27,7 @@ def _build_from_source():
 
 if not _have():
     if torch.version.cuda is None:
-        # CPU runtime: no matching prebuilt wheel -> source build (a GPU runtime is recommended)
-        _build_from_source()
+        _build_from_source()   # CPU runtime: no matching prebuilt wheel
     else:
         pyt = torch.__version__.split('+')[0].replace('.', '')
         cu = torch.version.cuda.replace('.', '')
@@ -82,6 +84,13 @@ plt.show()
 print(f'\nMean IoU across {N_VIEWS} views: {np.mean(iou_scores):.4f}')
 print('Per-view IoU:', [f'{s:.3f}' for s in iou_scores])'''
 
+TEX = ("gt_mesh = load_objs_as_meshes(['data/cow.obj'], device=device)\n"
+       "from pytorch3d.renderer import TexturesVertex\n"
+       "if gt_mesh.textures is None:\n"
+       "    _V = int(gt_mesh.num_verts_per_mesh()[0])\n"
+       "    gt_mesh.textures = TexturesVertex(verts_features=0.7 * torch.ones(1, _V, 3, device=device))\n"
+       "    print('mesh had no textures -> attached uniform gray vertex texture (RGB viz only)')")
+
 
 def main():
     nb = json.loads(NB.read_text(encoding="utf-8"))
@@ -90,10 +99,14 @@ def main():
         if c["cell_type"] != "code":
             continue
         src = "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
-        if "pytorch3d.git@stable" in src:
+        if "pytorch3d.git@stable" in src and "_build_from_source" not in src:
             c["source"] = INSTALL; fixed.append("install")
         elif "big_axes" in src or "ax_row" in src:
             c["source"] = EVAL; fixed.append("eval")
+        elif "load_objs_as_meshes(['data/cow.obj']" in src and "TexturesVertex" not in src:
+            c["source"] = src.replace(
+                "gt_mesh = load_objs_as_meshes(['data/cow.obj'], device=device)", TEX, 1)
+            fixed.append("texture")
     NB.write_text(json.dumps(nb, indent=1), encoding="utf-8")
     print("fixed cells:", fixed)
 
