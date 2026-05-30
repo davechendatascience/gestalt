@@ -37,6 +37,7 @@ import matplotlib.pyplot as plt
 from gestalt.render3d import library
 from gestalt.ae3d import rotate3d, _down
 from gestalt.r3dcnn import voxelize, render_silhouette, quat_to_R, R3DCNN
+from gestalt.backbones import resnet10
 
 D, NCsh, H = 20, 8, 48
 torch.manual_seed(0)
@@ -53,14 +54,21 @@ def render_occ(occ_n, R):                              # occ_n (n, D^3) -> silho
     return F.interpolate(s, (H, H), mode="bilinear", align_corners=False)[:, 0]
 
 
-class MCNet(nn.Module):                                # class head + pose (fixed per-class shape)
+class MCNet(nn.Module):                                # ResNet backbone -> class head + pose
     def __init__(self, K, H):
         super().__init__()
-        self.conv = nn.Sequential(_down(1, 16), _down(16, 32), _down(32, 64))
-        self.cls = nn.Linear(64, K); self.pose = nn.Linear(64, 4)
+        self.bb = resnet10(1); d = self.bb.out_dim
+        self.cls = nn.Linear(d, K); self.pose = nn.Linear(d, 4)
     def forward(self, x):
-        h = F.adaptive_avg_pool2d(self.conv(x), 1).flatten(1)
-        return self.cls(h), quat_to_R(self.pose(h))
+        h = self.bb(x); return self.cls(h), quat_to_R(self.pose(h))
+
+
+class ResShared(nn.Module):                            # ResNet backbone -> shape code + pose
+    def __init__(self, nc, H):
+        super().__init__()
+        self.bb = resnet10(1); self.head = nn.Linear(self.bb.out_dim, nc + 4); self.nc = nc
+    def forward(self, x):
+        o = self.head(self.bb(x)); return o[:, :self.nc], quat_to_R(o[:, self.nc:])
 
 
 def iou(a, b):
@@ -92,7 +100,7 @@ def main():
     print(f"=== multi-class 3D-RCNN over {K} classes: shared basis vs per-class fixed shapes ===\n")
 
     # shared low-dim basis (continuous code + pose)
-    sh = R3DCNN(NCsh, H); opt = torch.optim.Adam(sh.parameters(), 1.5e-3); t0 = time.time()
+    sh = ResShared(NCsh, H); opt = torch.optim.Adam(sh.parameters(), 1.5e-3); t0 = time.time()
     for ep in range(60):
         p = torch.randperm(len(Xtr))
         for i in range(0, len(p), 32):
