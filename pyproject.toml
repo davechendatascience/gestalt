@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gestalt"
 version = "0.1.0"
-description = "A sandbox-world MCP server for voice-driven agents: speak -> Qwen3-ASR -> Claude -> gestalt tools."
+description = "A sandbox-world MCP server for voice-driven agents: speak -> Qwen3-ASR -> Llama (Ollama) -> gestalt tools."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,8 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The agent loop (Claude + local MCP tool conversion). Notebook installs this.
-agent = ["anthropic[mcp]>=0.40"]
+# The agent loop: a local Llama model via Ollama, driving the gestalt MCP tools.
+agent = ["ollama>=0.4"]
 # Local speech-to-text (GPU recommended). Used on Colab.
 asr = ["qwen-asr", "soundfile"]
 dev = ["pytest"]

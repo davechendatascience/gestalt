@@ -7,7 +7,7 @@ Run over stdio (the default MCP transport for a local subprocess)::
 
 Set ``GESTALT_WORLD_FILE=/path/world.json`` to persist the scene to disk so
 another process can read it. Each tool returns a short human-readable string —
-the format Claude consumes most reliably — and surfaces errors as
+the format an LLM consumes most reliably — and surfaces errors as
 ``Error: ...`` text rather than crashing the tool call.
 """
 

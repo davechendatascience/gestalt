@@ -1,6 +1,6 @@
 """gestalt: a sandbox-world MCP server for voice-driven agents.
 
-Pipeline: speech --(Qwen3-ASR)--> text --(Claude)--> tool calls --> gestalt world.
+Pipeline: speech --(Qwen3-ASR)--> text --(Llama, via Ollama)--> tool calls --> gestalt world.
 """
 
 from .world import World, WorldError, WorldObject
