@@ -76,7 +76,10 @@ async def run_turn(
     to in place with this turn's user text and the final assistant reply so the
     next turn has context for references like "move it up".
     """
-    async with stdio_client(server_params()) as (read, write):
+    # In notebooks, sys.stderr (ipykernel) has no real file descriptor, which breaks
+    # the MCP subprocess launch — route the server's stderr to os.devnull.
+    errlog = open(os.devnull, "w")
+    async with stdio_client(server_params(), errlog=errlog) as (read, write):
         async with ClientSession(read, write) as mcp:
             await mcp.initialize()
             tools = mcp_to_ollama_tools((await mcp.list_tools()).tools)
@@ -104,6 +107,7 @@ async def run_turn(
                 reply = (messages[-1].get("content", "") if isinstance(messages[-1], dict)
                          else (getattr(messages[-1], "content", "") or "")).strip()
                 reply = reply or "(stopped after too many tool calls)"
+    errlog.close()
 
     history.append({"role": "user", "content": text})
     history.append({"role": "assistant", "content": reply})
