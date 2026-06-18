@@ -1,62 +1,75 @@
 # gestalt
 
-> *Perceive the entity as a whole, through a process, and read out its structure symbolically.*
+A voice-driven agent demo: **speak a command → [Qwen3-ASR] transcribes → [Claude] decides → [gestalt MCP] tools act on a sandbox 3D world.**
 
-**gestalt** is a research project on learning **high-level, transfer-robust
-representations** that are *relational and structural* rather than
-*region-local and textural*. It grows out of three observations that kept
-colliding:
+```
+  mic ──► Qwen3-ASR (GPU) ──► text ──► Claude (claude-opus-4-8)
+                                              │  tool calls (MCP, stdio)
+                                              ▼
+                                     gestalt-mcp server
+                                     (sandbox world tools)
+                                              │
+                                              ▼  world.json ──► 3D view
+```
 
-1. **The sim2real / OOD gap lives in appearance, not geometry.** When object
-   geometry is faithful (e.g. sim built from real reconstructions) but a model
-   trained on sim collapses on real, the failure is in nuisance factors —
-   texture, lighting, sensor, local render statistics. Region-local CNN
-   features *entangle* those nuisances into the representation, so they don't
-   survive the shift. (Empirically: global style transfer barely moves the gap
-   — the entanglement is local and structural, not a global recolor.)
+`gestalt` itself is a small, installable package: an **MCP server** that exposes a
+sandbox "world" of named 3D objects as tools (`add_object`, `move_object`,
+`set_color`, `describe_scene`, `find_objects`, `distance`, ...). Claude drives those
+tools; Qwen3-ASR turns speech into the commands.
 
-2. **What transfers is relational structure.** Shape, topology, part–whole
-   relations, and the *timing/co-variation* between features are one level of
-   abstraction above the features themselves — and that level is far more
-   invariant to the nuisance group. This is the honest home of symbolic /
-   geometric / equivariant methods: they don't beat a CNN *in-distribution*
-   (we have the receipts), but **out-of-distribution, structure that refuses
-   to overfit the nuisance factors can win.**
+## Layout
 
-3. **Perception of an entity is a process, not a single feed-forward pass.**
-   Sakana's Continuous Thought Machine reframes representation as *the timing
-   relationships between units over an internal clock* — and on mazes it
-   literally *traces the path* over internal ticks. "Observe the mask as an
-   entity" is naturally a **process**: attend, trace, accumulate — not a static
-   region convolution.
+| Path | What |
+|---|---|
+| `src/gestalt/world.py` | `World` — the in-memory scene (pure logic, file-backed, testable) |
+| `src/gestalt/mcp_server.py` | `gestalt-mcp` — FastMCP server exposing the world as tools (stdio) |
+| `notebooks/hermes_voice_agent_colab.ipynb` | **Colab**: Qwen3-ASR (GPU) → Claude → gestalt world, with a 3D visualizer |
+| `examples/text_agent.py` | The same Claude→MCP loop driven by typed text — runs anywhere, no GPU |
+| `tests/test_world.py` | Unit tests for the world logic |
 
-## Thesis
+## Run the voice agent (Colab)
 
-> High-level features that transfer = **(process) × (relation) × (symbol)**.
-> Trace the entity over an internal timeline (process), represent it by how its
-> parts co-vary (relation), and read that out as an interpretable, invariant
-> rule (symbol). Accuracy in-distribution is not the goal; **invariance and
-> transfer are.**
+Qwen3-ASR runs locally on a GPU, so use Colab:
 
-## What this is / isn't
+1. Open `notebooks/hermes_voice_agent_colab.ipynb` in Colab and set **Runtime → GPU**.
+2. Add `ANTHROPIC_API_KEY` to Colab **Secrets** (🔑).
+3. Run the cells: it installs deps, clones+installs this repo, loads Qwen3-ASR,
+   records a command, and runs it through Claude + the gestalt tools.
 
-- **Is:** a testbed + small architectures to find out whether process-based,
-  relational, symbolic readouts transfer better than region-local features on
-  controlled OOD/sim2real shifts — and where they don't.
-- **Isn't:** a bid to beat SOTA accuracy in-distribution. We expect to *match,
-  not crush*, on clean data (same verdict we reached for KAN/SR/equivariant
-  nets). The bet is the OOD axis.
+## Run the agent locally (no GPU, typed commands)
 
-## Relationship to tessera
+Verifies the Claude → gestalt-MCP wiring without speech:
 
-[`tessera`](../tessera) (gradient-free symbolic regression, `tessera.search.csp`)
-is an **optional** dependency: it's the natural "symbol" stage — fitting a
-compact, interpretable rule on top of relational/shape descriptors, exactly the
-small-dimensional clean-target regime where csp shines (and unlike raw
-perception, where it doesn't beat a CNN). The core of gestalt does not require
-it.
+```bash
+pip install -e ".[agent]"
+export ANTHROPIC_API_KEY=sk-ant-...          # Windows (PowerShell): $env:ANTHROPIC_API_KEY="sk-ant-..."
+python examples/text_agent.py
+# you> add a red cube called box at 1 2 0, then a blue sphere above it
+```
 
-## Status
+## Develop / test
 
-Day 0 — brainstorming. See [`docs/brainstorm.md`](docs/brainstorm.md) for the
-open directions, the honest risks, and the first experiment.
+```bash
+pip install -e ".[dev]"
+pytest                                        # world logic
+python -m gestalt.mcp_server                  # run the MCP server on stdio (Ctrl-C to stop)
+```
+
+Set `GESTALT_WORLD_FILE=/path/world.json` to persist the scene to disk (the
+notebook uses this to read and visualize the world after each command).
+
+## How it fits together (and where Hermes plugs in)
+
+- The agent turn is `run_command(text)` — transport-agnostic about whether `text`
+  was typed, transcribed, or queued. That's the seam a **Hermes** agent wraps.
+- `gestalt-mcp` is a standard MCP server. It's launched over **stdio** here, but the
+  same server can be exposed over HTTP/SSE and shared by any MCP client.
+- The world is the ground truth (`world.json`), not the chat history; the agent can
+  call `describe_scene` to re-ground at any time.
+
+## Requirements
+
+- Python ≥ 3.10
+- `mcp >= 1.20` (older FastMCP mishandles `X | None` tool annotations)
+- For the agent: `anthropic[mcp]` and an `ANTHROPIC_API_KEY`
+- For speech: `qwen-asr` + a GPU (Colab)

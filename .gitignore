@@ -1,14 +1,18 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
-.eggs/
 build/
 dist/
-.venv/
+.pytest_cache/
 .ipynb_checkpoints/
-data/
-runs/
-*.pkl
-*.pt
-*.npz
-.DS_Store
+
+# Runtime artifacts
+world.json
+*.wav
+*.webm
+
+# Env
+.venv/
+venv/
+.env

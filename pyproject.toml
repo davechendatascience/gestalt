@@ -4,21 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gestalt"
-version = "0.0.0"
-description = "Process x relation x symbol: transfer-robust high-level representations that perceive entities as wholes."
+version = "0.1.0"
+description = "A sandbox-world MCP server for voice-driven agents: speak -> Qwen3-ASR -> Claude -> gestalt tools."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
-    "scipy",
+    # FastMCP < ~1.14 mishandles `X | None` tool annotations; require a modern mcp.
+    "mcp>=1.20",
 ]
 
 [project.optional-dependencies]
-# Symbolic "readout" stage. Optional — the core does not require it.
-symbol = ["tessera"]
-# Process/perception experiments.
-torch = ["torch", "scikit-image"]
-dev = ["pytest", "matplotlib"]
+# The agent loop (Claude + local MCP tool conversion). Notebook installs this.
+agent = ["anthropic[mcp]>=0.40"]
+# Local speech-to-text (GPU recommended). Used on Colab.
+asr = ["qwen-asr", "soundfile"]
+dev = ["pytest"]
+
+[project.scripts]
+# Launched by the notebook over stdio; serves the sandbox world as MCP tools.
+gestalt-mcp = "gestalt.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
